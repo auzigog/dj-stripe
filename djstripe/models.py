@@ -318,6 +318,21 @@ class TransferChargeFee(TimeStampedModel):
 
 
 @python_2_unicode_compatible
+class Account(StripeObject):
+    user = models.OneToOneField(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
+    publishable_key = models.CharField(max_length=200)
+    access_token = models.CharField(max_length=200)
+    refresh_token = models.CharField(max_length=200, blank=True)
+    name = models.CharField(max_length=200, blank=True)
+    email = models.EmailField(blank=True)
+
+    @property
+    def stripe_account(self):
+        # Pass the account's access token instead of our own
+        return stripe.Account.retrieve(self.access_token)
+
+
+@python_2_unicode_compatible
 class Customer(StripeObject):
 
     user = models.OneToOneField(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
