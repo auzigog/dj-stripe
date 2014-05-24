@@ -326,6 +326,9 @@ class Account(StripeObject):
     name = models.CharField(max_length=200, blank=True)
     email = models.EmailField(blank=True)
 
+    def __str__(self):
+        return unicode(self.user)
+
     @property
     def stripe_account(self):
         # Pass the account's access token instead of our own
