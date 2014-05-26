@@ -447,11 +447,11 @@ class Customer(StripeObject):
         return self.cancel_subscription(at_period_end=at_period_end)
 
     @classmethod
-    def get_or_create(cls, user):
+    def get_or_create(cls, user, account=None):
         try:
             return Customer.objects.get(user=user), False
         except Customer.DoesNotExist:
-            return cls.create(user), True
+            return cls.create(user, account=account), True
 
     @classmethod
     def create(cls, user, account=None):
@@ -460,8 +460,10 @@ class Customer(StripeObject):
         if TRIAL_PERIOD_FOR_USER_CALLBACK:
             trial_days = TRIAL_PERIOD_FOR_USER_CALLBACK(user)
 
+        api_key = (account.get_api_key() if account else None)
+
         stripe_customer = stripe.Customer.create(
-            api_key=(account.get_api_key() if account else None),
+            api_key=api_key,
             email=user.email
         )
         cus = Customer.objects.create(
