@@ -72,6 +72,26 @@ class StripeObject(TimeStampedModel):
 
 
 @python_2_unicode_compatible
+class Account(StripeObject):
+    user = models.OneToOneField(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
+    publishable_key = models.CharField(max_length=200)
+    access_token = models.CharField(max_length=200)
+    refresh_token = models.CharField(max_length=200, blank=True)
+    name = models.CharField(max_length=200, blank=True)
+    email = models.EmailField(blank=True)
+
+    def __str__(self):
+        return unicode(self.user)
+
+    def get_api_key(self):
+        return self.access_token
+
+    @property
+    def stripe_account(self):
+        return stripe.Account.retrieve(self.get_api_key())
+
+
+@python_2_unicode_compatible
 class EventProcessingException(TimeStampedModel):
 
     event = models.ForeignKey("Event", null=True)
@@ -110,6 +130,12 @@ class Event(StripeObject):
     def __str__(self):
         return "%s - %s" % (self.kind, self.stripe_id)
 
+    def get_api_key(self):
+        if self.customer and self.customer.account:
+            return self.customer.account.get_api_key()
+        else:
+            return None
+
     def link_customer(self):
         cus_id = None
         customer_crud_events = [
@@ -130,7 +156,7 @@ class Event(StripeObject):
                 pass
 
     def validate(self):
-        evt = stripe.Event.retrieve(self.stripe_id)
+        evt = stripe.Event.retrieve(self.stripe_id, api_key=self.get_api_key())
         self.validated_message = json.loads(
             json.dumps(
                 evt.to_dict(),
@@ -231,6 +257,7 @@ class Event(StripeObject):
 
 
 class Transfer(StripeObject):
+    account = models.ForeignKey(Account, null=True)
     event = models.ForeignKey(Event, related_name="transfers")
     amount = models.DecimalField(decimal_places=2, max_digits=7)
     status = models.CharField(max_length=25)
@@ -253,8 +280,14 @@ class Transfer(StripeObject):
 
     objects = TransferManager()
 
+    def get_api_key(self):
+        if self.account:
+            return self.account.get_api_key()
+        else:
+            return None
+
     def update_status(self):
-        self.status = stripe.Transfer.retrieve(self.stripe_id).status
+        self.status = stripe.Transfer.retrieve(self.stripe_id, api_key=self.get_api_key()).status
         self.save()
 
     @classmethod
@@ -318,27 +351,10 @@ class TransferChargeFee(TimeStampedModel):
 
 
 @python_2_unicode_compatible
-class Account(StripeObject):
-    user = models.OneToOneField(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
-    publishable_key = models.CharField(max_length=200)
-    access_token = models.CharField(max_length=200)
-    refresh_token = models.CharField(max_length=200, blank=True)
-    name = models.CharField(max_length=200, blank=True)
-    email = models.EmailField(blank=True)
-
-    def __str__(self):
-        return unicode(self.user)
-
-    @property
-    def stripe_account(self):
-        # Pass the account's access token instead of our own
-        return stripe.Account.retrieve(self.access_token)
-
-
-@python_2_unicode_compatible
 class Customer(StripeObject):
 
     user = models.OneToOneField(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
+    account = models.ForeignKey(Account, null=True)
     card_fingerprint = models.CharField(max_length=200, blank=True)
     card_last_4 = models.CharField(max_length=4, blank=True)
     card_kind = models.CharField(max_length=50, blank=True)
@@ -349,9 +365,15 @@ class Customer(StripeObject):
     def __str__(self):
         return unicode(self.user)
 
+    def get_api_key(self):
+        if self.account:
+            return self.account.get_api_key()
+        else:
+            return None
+
     @property
     def stripe_customer(self):
-        return stripe.Customer.retrieve(self.stripe_id)
+        return stripe.Customer.retrieve(self.stripe_id, api_key=self.get_api_key())
 
     def purge(self):
         try:
@@ -432,18 +454,20 @@ class Customer(StripeObject):
             return cls.create(user), True
 
     @classmethod
-    def create(cls, user):
+    def create(cls, user, account=None):
 
         trial_days = None
         if TRIAL_PERIOD_FOR_USER_CALLBACK:
             trial_days = TRIAL_PERIOD_FOR_USER_CALLBACK(user)
 
         stripe_customer = stripe.Customer.create(
+            api_key=(account.get_api_key() if account else None),
             email=user.email
         )
         cus = Customer.objects.create(
             user=user,
-            stripe_id=stripe_customer.id
+            stripe_id=stripe_customer.id,
+            account=account
         )
 
         if DEFAULT_PLAN and trial_days:
@@ -472,7 +496,7 @@ class Customer(StripeObject):
 
     def send_invoice(self):
         try:
-            invoice = stripe.Invoice.create(customer=self.stripe_id)
+            invoice = stripe.Invoice.create(api_key=self.get_api_key(), customer=self.stripe_id)
             invoice.pay()
             return True
         except stripe.InvalidRequestError:
@@ -596,6 +620,7 @@ class Customer(StripeObject):
                 "You must supply a decimal value representing dollars."
             )
         resp = stripe.Charge.create(
+            api_key=self.get_api_key(),
             amount=int(amount * 100),  # Convert dollars into cents
             currency=currency,
             customer=self.stripe_id,
@@ -607,7 +632,7 @@ class Customer(StripeObject):
         return obj
 
     def record_charge(self, charge_id):
-        data = stripe.Charge.retrieve(charge_id)
+        data = stripe.Charge.retrieve(charge_id, api_key=self.get_api_key())
         return Charge.sync_from_stripe_data(data)
 
 
@@ -638,6 +663,12 @@ class CurrentSubscription(TimeStampedModel):
     trial_end = models.DateTimeField(null=True, blank=True)
     trial_start = models.DateTimeField(null=True, blank=True)
     amount = models.DecimalField(decimal_places=2, max_digits=7)
+
+    def get_api_key(self):
+        if self.customer.account:
+            return self.customer.account.get_api_key()
+        else:
+            return None
 
     def plan_display(self):
         return PAYMENTS_PLANS[self.plan]["name"]
@@ -688,9 +719,15 @@ class Invoice(TimeStampedModel):
     class Meta:
         ordering = ["-date"]
 
+    def get_api_key(self):
+        if self.customer.account:
+            return self.customer.account.get_api_key()
+        else:
+            return None
+
     def retry(self):
         if not self.paid and not self.closed:
-            inv = stripe.Invoice.retrieve(self.stripe_id)
+            inv = stripe.Invoice.retrieve(self.stripe_id, api_key=self.get_api_key())
             inv.pay()
             return True
         return False
@@ -790,11 +827,11 @@ class Invoice(TimeStampedModel):
         return invoice
 
     @classmethod
-    def handle_event(cls, event):
+    def handle_event(cls, event, api_key=None):
         valid_events = ["invoice.payment_failed", "invoice.payment_succeeded"]
         if event.kind in valid_events:
             invoice_data = event.message["data"]["object"]
-            stripe_invoice = stripe.Invoice.retrieve(invoice_data["id"])
+            stripe_invoice = stripe.Invoice.retrieve(invoice_data["id"], api_key=api_key)
             cls.sync_from_stripe_data(stripe_invoice, send_receipt=SEND_INVOICE_RECEIPT_EMAILS)
 
 
@@ -841,6 +878,12 @@ class Charge(StripeObject):
 
     objects = ChargeManager()
 
+    def get_api_key(self):
+        if self.customer.account:
+            return self.customer.account.get_api_key()
+        else:
+            return None
+
     def calculate_refund_amount(self, amount=None):
         eligible_to_refund = self.amount - (self.amount_refunded or 0)
         if amount:
@@ -851,9 +894,11 @@ class Charge(StripeObject):
 
     def refund(self, amount=None):
         charge_obj = stripe.Charge.retrieve(
-            self.stripe_id
+            self.stripe_id,
+            api_key=self.get_api_key()
         ).refund(
-            amount=self.calculate_refund_amount(amount=amount)
+            amount=self.calculate_refund_amount(amount=amount),
+            api_key=self.get_api_key()
         )
         Charge.sync_from_stripe_data(charge_obj)
 
@@ -922,6 +967,7 @@ class Plan(StripeObject):
     """A Stripe Plan."""
 
     name = models.CharField(max_length=100, null=False)
+    account = models.ForeignKey(Account, null=True)
     currency = models.CharField(
         choices=CURRENCIES,
         max_length=10,
@@ -943,11 +989,18 @@ class Plan(StripeObject):
     def __str__(self):
         return self.name
 
+    def get_api_key(self):
+        if self.account:
+            return self.account.get_api_key()
+        else:
+            return None
+
     @classmethod
     def create(cls, metadata={}, **kwargs):
         """Create and then return a Plan (both in Stripe, and in our db)."""
 
         stripe.Plan.create(
+            api_key=kwargs['account'].get_api_key(),
             id=kwargs['stripe_id'],
             amount=int(kwargs['amount'] * 100),
             currency=kwargs['currency'],
@@ -958,6 +1011,7 @@ class Plan(StripeObject):
             metadata=metadata)
 
         plan = Plan.objects.create(
+            account=kwargs['account'],
             stripe_id=kwargs['stripe_id'],
             amount=kwargs['amount'],
             currency=kwargs['currency'],
@@ -986,7 +1040,7 @@ class Plan(StripeObject):
 
         """
 
-        p = stripe.Plan.retrieve(self.stripe_id)
+        p = stripe.Plan.retrieve(self.stripe_id, api_key=self.get_api_key())
         p.name = self.name
         p.save()
 
@@ -995,4 +1049,4 @@ class Plan(StripeObject):
     @property
     def stripe_plan(self):
         """Return the plan data from Stripe."""
-        return stripe.Plan.retrieve(self.stripe_id)
+        return stripe.Plan.retrieve(self.stripe_id, api_key=self.get_api_key())
